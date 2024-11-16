@@ -1,0 +1,92 @@
+
+
+#include <WiFi.h>
+//client 
+// Replace with your network credentials (STATION)
+const char* ssid = "ESP32-Access-Point";
+const char* password = "123456789";
+
+// Moving Average Filter parameters
+#define WINDOW_SIZE 10 // Number of readings to average
+int rssiReadings[WINDOW_SIZE]; // Array to store RSSI readings
+int currentIndex = 0; // Index to keep track of current position in the array
+
+// Calibrated RSSI values at known distances
+const int rssi_at_half_meter = -45; // Measured RSSI at 0.5 meters
+const int rssi_at_1_meter = -50; // Measured RSSI at 1 meter
+const int rssi_at_one_half_meter = -55; // Measured RSSI at 1.5 meters
+
+void initWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid , password);
+  Serial.print("Connecting to WiFi ..");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print('.');
+    delay(500);
+  }
+  Serial.println("\nConnected to WiFi");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+float movingAverageRSSI(int newRssi) {
+  // Update the readings array with the latest RSSI value
+  rssiReadings[currentIndex] = newRssi;
+  currentIndex = (currentIndex + 1) % WINDOW_SIZE;
+
+  // Calculate the average of the RSSI values in the window
+  int sum = 0;
+  for (int i = 0; i < WINDOW_SIZE; i++) {
+    sum += rssiReadings[i];
+  }
+  return sum / float(WINDOW_SIZE);
+}
+
+// Adjust path loss exponent based on smoothed RSSI and calibration data
+float calculateDistance(float smoothedRSSI) {
+  float pathLossExponent;
+
+  // Dynamically adjust path loss exponent based on RSSI values
+  if (smoothedRSSI >= rssi_at_half_meter) {
+    pathLossExponent = 2.4; // Higher exponent for closer range
+  } else if (smoothedRSSI >= rssi_at_1_meter) {
+    pathLossExponent = 2.2; // Medium exponent for around 1 meter
+  } else {
+    pathLossExponent = 2; // Lower exponent for further range
+  }
+
+  // Calculate distance using the adjusted path loss exponent
+  float distance = pow(10, (rssi_at_1_meter - smoothedRSSI) / (10 * pathLossExponent));
+  return distance;
+}
+
+void setup() {
+  Serial.begin(115200);
+  initWiFi();
+
+  // Initialize rssiReadings array with the initial RSSI value
+  int initialRSSI = WiFi.RSSI();
+  for (int i = 0; i < WINDOW_SIZE; i++) {
+    rssiReadings[i] = initialRSSI;
+  }
+}
+
+void loop() {
+  // Get current RSSI value
+  int rssi = WiFi.RSSI();
+
+  // Apply moving average filter to RSSI
+  float smoothedRSSI = movingAverageRSSI(rssi);
+
+  // Calculate distance based on smoothed RSSI with calibration
+  float distance = calculateDistance(smoothedRSSI);
+
+  // Print results
+  Serial.print("Smoothed RSSI: ");
+  Serial.println(smoothedRSSI);
+  Serial.print("Calculated Distance: ");
+  Serial.println(distance);
+
+  // Wait before next reading
+  delay(500);
+}
