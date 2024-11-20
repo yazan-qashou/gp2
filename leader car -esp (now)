@@ -1,0 +1,136 @@
+#include "BluetoothSerial.h"
+#include <WiFi.h>
+#include <esp_now.h>
+
+// Bluetooth and Motor control setup
+BluetoothSerial serialBT;
+char btSignal;
+int Speed = 100;
+int enA = 5, enB = 23;
+int IN1 = 22, IN2 = 21, IN3 = 19, IN4 = 18;
+#define R 0
+#define L 1
+
+// ESP-NOW setup for communication with followers
+uint8_t followerAddr[] = {0xFC, 0xE8, 0xC0, 0x75, 0x06, 0xC4}; // Example MAC address of the follower
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize Bluetooth
+  serialBT.begin("car(yazan)");
+  Serial.println("Bluetooth initialized");
+
+  // Setup motor control pins and PWM
+  pinMode(enA, OUTPUT);
+  pinMode(enB, OUTPUT);
+  ledcSetup(R, 5000, 8);  // Right motor PWM setup
+  ledcAttachPin(enA, R);
+  ledcSetup(L, 5000, 8);  // Left motor PWM setup
+  ledcAttachPin(enB, L);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  stop();  // Set motors to stop initially
+
+  // Initialize ESP-NOW
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+  Serial.println("ESP-NOW initialized");
+
+  // Add follower as a peer
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, followerAddr, 6);
+  peerInfo.channel = 0;  // Default Wi-Fi channel
+  peerInfo.encrypt = false;
+
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add peer");
+    return;
+  }
+  Serial.println("Follower added as a peer");
+}
+
+void loop() {
+  // Check for Bluetooth commands
+  while (serialBT.available()) {
+    btSignal = serialBT.read();
+
+    // Speed adjustment commands
+    if (btSignal == '0') Speed = 100;
+    else if (btSignal == '1') Speed = 110;
+    else if (btSignal == '2') Speed = 120;
+    else if (btSignal == '3') Speed = 130;
+    else if (btSignal == '4') Speed = 140;
+    else if (btSignal == '5') Speed = 150;
+    else if (btSignal == '6') Speed = 180;
+    else if (btSignal == '7') Speed = 200;
+    else if (btSignal == '8') Speed = 220;
+    else if (btSignal == '9') Speed = 240;
+    else if (btSignal == 'q') Speed = 255;
+
+    // Directional commands
+    if (btSignal == 'F') forward();
+    else if (btSignal == 'B') backward();
+    else if (btSignal == 'L') left();
+    else if (btSignal == 'R') right();
+    else if (btSignal == 'S') stop();
+
+    // Send leader data to followers
+    sendLeaderData();
+  }
+}
+
+// Motor control functions
+void forward() {
+  ledcWrite(R, Speed);
+  ledcWrite(L, Speed);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+}
+
+void backward() {
+  ledcWrite(R, Speed);
+  ledcWrite(L, Speed);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void left() {
+  ledcWrite(R, Speed);
+  ledcWrite(L, Speed);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void right() {
+  ledcWrite(R, Speed);
+  ledcWrite(L, Speed);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+}
+
+void stop() {
+  ledcWrite(R, 0);
+  ledcWrite(L, 0);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
+}
+
+// Function to send leader's data to followers via ESP-NOW
+void sendLeaderData() {
+  int posX = random(0, 500);  // Example position X
+  int posY = random(0, 500);  // Example position Y
+  String leaderData = "LeaderData: X=" + String(posX) + " Y=" + String(posY);
+  esp_err_t result = esp_now_send(followerAddr, (uint8_t*)leaderData.c_str(), leaderData.length());
+
+  if (result == ESP_OK) {
+    Serial.println("Data sent successfully: " + leaderData);
+  } else {
+    Serial.println("Error sending data");
+  }
+}
