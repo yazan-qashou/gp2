@@ -12,7 +12,17 @@ int IN1 = 22, IN2 = 21, IN3 = 19, IN4 = 18;
 #define L 1
 
 // ESP-NOW setup for communication with followers
-uint8_t followerAddr[] = {0xFC, 0xE8, 0xC0, 0x75, 0x06, 0xC4}; // Example MAC address of the follower
+uint8_t followerAddr[] = {0xFC, 0xE8, 0xC0, 0x75, 0x06, 0xC4}; // Replace with follower MAC address
+
+// Structure for sending data to followers
+typedef struct {
+  int posX;       // Leader's X position
+  int posY;       // Leader's Y position
+  char command;   // Directional command ('F', 'B', 'L', 'R', 'S')
+  int speed;      // Leader's speed
+} LeaderData;
+
+LeaderData leaderData;
 
 void setup() {
   Serial.begin(115200);
@@ -24,10 +34,8 @@ void setup() {
   // Setup motor control pins and PWM
   pinMode(enA, OUTPUT);
   pinMode(enB, OUTPUT);
-  ledcSetup(R, 5000, 8);  // Right motor PWM setup
-  ledcAttachPin(enA, R);
-  ledcSetup(L, 5000, 8);  // Left motor PWM setup
-  ledcAttachPin(enB, L);
+  ledcSetup(R, 5000, 8);  ledcAttachPin(enA, R);
+  ledcSetup(L, 5000, 8);  ledcAttachPin(enB, L);
   pinMode(IN1, OUTPUT);
   pinMode(IN2, OUTPUT);
   pinMode(IN3, OUTPUT);
@@ -60,7 +68,7 @@ void loop() {
   while (serialBT.available()) {
     btSignal = serialBT.read();
 
-    // Speed adjustment commands
+    // Adjust speed
     if (btSignal == '0') Speed = 100;
     else if (btSignal == '1') Speed = 110;
     else if (btSignal == '2') Speed = 120;
@@ -81,7 +89,7 @@ void loop() {
     else if (btSignal == 'S') stop();
 
     // Send leader data to followers
-    sendLeaderData();
+    sendLeaderData(btSignal, Speed);
   }
 }
 
@@ -121,16 +129,18 @@ void stop() {
   digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
 }
 
-// Function to send leader's data to followers via ESP-NOW
-void sendLeaderData() {
-  int posX = random(0, 500);  // Example position X
-  int posY = random(0, 500);  // Example position Y
-  String leaderData = "LeaderData: X=" + String(posX) + " Y=" + String(posY);
-  esp_err_t result = esp_now_send(followerAddr, (uint8_t*)leaderData.c_str(), leaderData.length());
+// Function to send leader's data to followers
+void sendLeaderData(char command, int speed) {
+  leaderData.posX = random(0, 500);  // Example X position
+  leaderData.posY = random(0, 500);  // Example Y position
+  leaderData.command = command;
+  leaderData.speed = speed;
 
+  esp_err_t result = esp_now_send(followerAddr, (uint8_t*)&leaderData, sizeof(leaderData));
   if (result == ESP_OK) {
-    Serial.println("Data sent successfully: " + leaderData);
+    Serial.println("Data sent successfully");
   } else {
     Serial.println("Error sending data");
   }
 }
+
