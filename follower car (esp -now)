@@ -1,77 +1,76 @@
 #include <WiFi.h>
 #include <esp_now.h>
 
-// Motor control pins
+// Motor control pins and setup
 int enA = 5, enB = 23;
 int IN1 = 22, IN2 = 21, IN3 = 19, IN4 = 18;
 #define R 0
 #define L 1
 
+// Follower position and threshold
+int followerPosX = 90; // Initial position near the leader
+int followerPosY = 90;
+int movementThreshold = 10;
+
 // Structure to match leader's data
 typedef struct {
-  int posX;       // Leader's X position
-  int posY;       // Leader's Y position
-  char command;   // Directional command ('F', 'B', 'L', 'R', 'S')
-  int speed;      // Leader's speed
+  int posX;
+  int posY;
+  char command;
+  int speed;
+  char direction;
 } LeaderData;
 
 LeaderData leaderData;
 
-// Callback function for ESP-NOW
-void onDataReceived(const uint8_t *mac, const uint8_t *data, int len) {
-  memcpy(&leaderData, data, sizeof(leaderData));
-  Serial.println("Data received from Leader:");
-  Serial.print("Position X: "); Serial.println(leaderData.posX);
-  Serial.print("Position Y: "); Serial.println(leaderData.posY);
-  Serial.print("Command: "); Serial.println(leaderData.command);
-  Serial.print("Speed: "); Serial.println(leaderData.speed);
-
-  // Act based on leader's command
-  handleLeaderCommand();
-}
-
 void setup() {
   Serial.begin(115200);
 
-  // Setup motor control pins and PWM
   pinMode(enA, OUTPUT);
   pinMode(enB, OUTPUT);
-  ledcSetup(R, 5000, 8);  ledcAttachPin(enA, R);
-  ledcSetup(L, 5000, 8);  ledcAttachPin(enB, L);
+  ledcSetup(R, 5000, 8);
+  ledcAttachPin(enA, R);
+  ledcSetup(L, 5000, 8);
+  ledcAttachPin(enB, L);
   pinMode(IN1, OUTPUT);
   pinMode(IN2, OUTPUT);
   pinMode(IN3, OUTPUT);
   pinMode(IN4, OUTPUT);
-  stop();  // Set motors to stop initially
+  stop();
 
-  // Initialize ESP-NOW
   WiFi.mode(WIFI_STA);
   if (esp_now_init() != ESP_OK) {
     Serial.println("Error initializing ESP-NOW");
     return;
   }
-  Serial.println("ESP-NOW initialized");
-
-  // Register callback function for receiving data
   esp_now_register_recv_cb(onDataReceived);
 }
 
-void loop() {
-  // Main loop does nothing; follower actions are triggered by ESP-NOW callback
-}
+void loop() {}
 
-// Function to handle commands from the leader
-void handleLeaderCommand() {
-  switch (leaderData.command) {
-    case 'F': forward(); break;
-    case 'B': backward(); break;
-    case 'L': left(); break;
-    case 'R': right(); break;
-    case 'S': stop(); break;
+void onDataReceived(const uint8_t *mac, const uint8_t *data, int len) {
+  memcpy(&leaderData, data, sizeof(leaderData));
+
+  int deltaX = leaderData.posX - followerPosX;
+  int deltaY = leaderData.posY - followerPosY;
+
+  if (abs(deltaX) > movementThreshold || abs(deltaY) > movementThreshold) {
+    followerPosX += (deltaX > 0) ? 10 : (deltaX < 0) ? -10 : 0;
+    followerPosY += (deltaY > 0) ? 10 : (deltaY < 0) ? -10 : 0;
+    handleLeaderCommand();
+  } else {
+    stop();
   }
 }
 
-// Motor control functions
+void handleLeaderCommand() {
+  if (leaderData.command == 'F') forward();
+  else if (leaderData.command == 'B') backward();
+  else if (leaderData.command == 'L') left();
+  else if (leaderData.command == 'R') right();
+  else if (leaderData.command == 'S') stop();
+}
+
 void forward() {
   ledcWrite(R, leaderData.speed);
   ledcWrite(L, leaderData.speed);
@@ -106,4 +105,3 @@ void stop() {
   digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
   digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
 }
-
