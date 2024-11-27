@@ -131,3 +131,4 @@ void sendLeaderData(char command, int speed, char direction) {
 
   esp_now_send(followerAddr, (uint8_t*)&leaderData, sizeof(leaderData));
 }
+
