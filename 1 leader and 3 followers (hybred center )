@@ -1,0 +1,443 @@
+//LEADER 
+#include "BluetoothSerial.h"
+#include <WiFi.h>
+#include <esp_now.h>
+
+BluetoothSerial serialBT;
+char btSignal;
+int Speed = 100;
+int enA = 5, enB = 23;
+int IN1 = 22, IN2 = 21, IN3 = 19, IN4 = 18;
+#define R 0
+#define L 1
+
+uint8_t followerAddr[] = {0xFC, 0xE8, 0xC0, 0x75, 0x06, 0xC4};
+
+// Leader Data Structure
+typedef struct {
+  int posX;
+  int posY;
+  char command;
+  int speed;
+  char direction;
+} LeaderData;
+
+LeaderData leaderData = {100, 100, 'S', 0, 'N'}; // Initialize with a non-zero position
+
+void setup() {
+  Serial.begin(115200);
+
+  serialBT.begin("car(yazan)");
+  Serial.println("Bluetooth initialized");
+
+  pinMode(enA, OUTPUT);
+  pinMode(enB, OUTPUT);
+  ledcSetup(R, 5000, 8);
+  ledcAttachPin(enA, R);
+  ledcSetup(L, 5000, 8);
+  ledcAttachPin(enB, L);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  stop();
+
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+  Serial.println("ESP-NOW initialized");
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, followerAddr, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add peer");
+    return;
+  }
+}
+
+void loop() {
+  while (serialBT.available()) {
+    btSignal = serialBT.read();
+
+    if (btSignal == '0') Speed = 100;
+    else if (btSignal == '1') Speed = 110;
+    else if (btSignal == '2') Speed = 120;
+    else if (btSignal == '3') Speed = 130;
+    else if (btSignal == '4') Speed = 140;
+    else if (btSignal == '5') Speed = 150;
+    else if (btSignal == '6') Speed = 180;
+    else if (btSignal == '7') Speed = 200;
+    else if (btSignal == '8') Speed = 220;
+    else if (btSignal == '9') Speed = 240;
+    else if (btSignal == 'q') Speed = 255;
+
+    if (btSignal == 'F') { forward(); leaderData.direction = 'N'; }
+    else if (btSignal == 'B') { backward(); leaderData.direction = 'S'; }
+    else if (btSignal == 'L') { left(); leaderData.direction = 'W'; }
+    else if (btSignal == 'R') { right(); leaderData.direction = 'E'; }
+    else if (btSignal == 'S') stop();
+
+    sendLeaderData(btSignal, Speed, leaderData.direction);
+  }
+}
+
+void forward() {
+  ledcWrite(R, Speed);
+  ledcWrite(L, Speed);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+}
+
+void backward() {
+  ledcWrite(R, Speed);
+  ledcWrite(L, Speed);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void left() {
+  ledcWrite(R, Speed);
+  ledcWrite(L, Speed);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void right() {
+  ledcWrite(R, Speed);
+  ledcWrite(L, Speed);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+}
+
+void stop() {
+  ledcWrite(R, 0);
+  ledcWrite(L, 0);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
+}
+
+void sendLeaderData(char command, int speed, char direction) {
+  leaderData.command = command;
+  leaderData.speed = speed;
+
+  if (command == 'F') leaderData.posX += 10;
+  else if (command == 'B') leaderData.posX -= 10;
+  else if (command == 'L') leaderData.posY -= 10;
+  else if (command == 'R') leaderData.posY += 10;
+
+  esp_now_send(followerAddr, (uint8_t*)&leaderData, sizeof(leaderData));
+}
+
+
+
+//----------------------------------------------------------------------------------------------------------------------------------------
+
+
+//first follower and second (diiferint mac add)
+#include <WiFi.h>
+#include <esp_now.h>
+
+// Motor control pins and setup
+int enA = 5, enB = 23;
+int IN1 = 22, IN2 = 21, IN3 = 19, IN4 = 18;
+#define R 0
+#define L 1
+
+// Follower offsets (unique for each follower)
+int offsetX = -10; // Default offset for formation
+int offsetY = 0;
+
+// Follower position and threshold
+int followerPosX = 90; // Initial position near the predecessor
+int followerPosY = 90;
+int movementThreshold = 10;
+
+// Leader/Follower Data Structure
+typedef struct {
+  int posX;
+  int posY;
+  char command;
+  int speed;
+  char direction;
+} LeaderData;
+
+LeaderData receivedData;  // Data received from the predecessor
+LeaderData followerData;  // Data to send to the next follower
+
+// MAC address of the next follower
+uint8_t nextFollowerAddr[] = {0x24, 0x6F, 0x28, 0x88, 0xBB, 0xCC}; // Update for each follower
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(enA, OUTPUT);
+  pinMode(enB, OUTPUT);
+  ledcSetup(R, 5000, 8);
+  ledcAttachPin(enA, R);
+  ledcSetup(L, 5000, 8);
+  ledcAttachPin(enB, L);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  stop();
+
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+  esp_now_register_recv_cb(onDataReceived);
+
+  // Add the next follower as a peer
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, nextFollowerAddr, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add next follower as a peer");
+    return;
+  }
+  Serial.println("Next follower added as a peer");
+}
+
+void loop() {
+  // Share position with the next follower periodically
+  static unsigned long lastShareTime = 0;
+  const unsigned long shareInterval = 100; // Share data every 100ms
+
+  if (millis() - lastShareTime > shareInterval) {
+    lastShareTime = millis();
+    shareFollowerData();
+  }
+}
+
+void onDataReceived(const uint8_t *mac, const uint8_t *data, int len) {
+  memcpy(&receivedData, data, sizeof(LeaderData));
+  Serial.println("Data received from predecessor");
+
+  adjustPosition();
+}
+
+void adjustPosition() {
+  int targetX = receivedData.posX + offsetX;
+  int targetY = receivedData.posY + offsetY;
+
+  int deltaX = targetX - followerPosX;
+  int deltaY = targetY - followerPosY;
+
+  if (abs(deltaX) > movementThreshold || abs(deltaY) > movementThreshold) {
+    followerPosX += (deltaX > 0) ? 10 : (deltaX < 0) ? -10 : 0;
+    followerPosY += (deltaY > 0) ? 10 : (deltaY < 0) ? -10 : 0;
+
+    handleReceivedCommand(receivedData.command);
+  } else {
+    stop();
+  }
+}
+
+void handleReceivedCommand(char command) {
+  if (command == 'F') forward();
+  else if (command == 'B') backward();
+  else if (command == 'L') left();
+  else if (command == 'R') right();
+  else if (command == 'S') stop();
+}
+
+void forward() {
+  ledcWrite(R, receivedData.speed);
+  ledcWrite(L, receivedData.speed);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+}
+
+void backward() {
+  ledcWrite(R, receivedData.speed);
+  ledcWrite(L, receivedData.speed);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void left() {
+  ledcWrite(R, receivedData.speed);
+  ledcWrite(L, receivedData.speed);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void right() {
+  ledcWrite(R, receivedData.speed);
+  ledcWrite(L, receivedData.speed);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+}
+
+void stop() {
+  ledcWrite(R, 0);
+  ledcWrite(L, 0);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
+}
+
+void shareFollowerData() {
+  followerData.posX = followerPosX;
+  followerData.posY = followerPosY;
+  followerData.command = receivedData.command;
+  followerData.speed = receivedData.speed;
+  followerData.direction = receivedData.direction;
+
+  esp_err_t result = esp_now_send(nextFollowerAddr, (uint8_t*)&followerData, sizeof(followerData));
+  if (result == ESP_OK) {
+    Serial.println("Follower data sent to next follower");
+  } else {
+    Serial.print("Broadcast failed: ");
+    Serial.println(result);
+  }
+}
+
+
+//--------------------------------------------------------------------------------------------------
+
+
+//third follower 
+
+#include <WiFi.h>
+#include <esp_now.h>
+
+// Motor control pins and setup
+int enA = 5, enB = 23;
+int IN1 = 22, IN2 = 21, IN3 = 19, IN4 = 18;
+#define R 0
+#define L 1
+
+// Follower offsets (unique for Follower 3)
+int offsetX = -10;  // Adjust for formation
+int offsetY = 10;
+
+// Follower position and threshold
+int followerPosX = 90; // Initial position near the predecessor
+int followerPosY = 90;
+int movementThreshold = 10;
+
+// Leader/Follower Data Structure
+typedef struct {
+  int posX;
+  int posY;
+  char command;
+  int speed;
+  char direction;
+} LeaderData;
+
+LeaderData receivedData;  // Data received from the predecessor
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(enA, OUTPUT);
+  pinMode(enB, OUTPUT);
+  ledcSetup(R, 5000, 8);
+  ledcAttachPin(enA, R);
+  ledcSetup(L, 5000, 8);
+  ledcAttachPin(enB, L);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  stop();
+
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+  esp_now_register_recv_cb(onDataReceived);
+  Serial.println("ESP-NOW initialized");
+}
+
+void loop() {
+  // No need to send data to a successor since Follower 3 is the last in the chain
+}
+
+void onDataReceived(const uint8_t *mac, const uint8_t *data, int len) {
+  memcpy(&receivedData, data, sizeof(LeaderData));
+  Serial.println("Data received from predecessor");
+
+  adjustPosition();
+}
+
+void adjustPosition() {
+  int targetX = receivedData.posX + offsetX;
+  int targetY = receivedData.posY + offsetY;
+
+  int deltaX = targetX - followerPosX;
+  int deltaY = targetY - followerPosY;
+
+  if (abs(deltaX) > movementThreshold || abs(deltaY) > movementThreshold) {
+    followerPosX += (deltaX > 0) ? 10 : (deltaX < 0) ? -10 : 0;
+    followerPosY += (deltaY > 0) ? 10 : (deltaY < 0) ? -10 : 0;
+
+    handleReceivedCommand(receivedData.command);
+  } else {
+    stop();
+  }
+}
+
+void handleReceivedCommand(char command) {
+  if (command == 'F') forward();
+  else if (command == 'B') backward();
+  else if (command == 'L') left();
+  else if (command == 'R') right();
+  else if (command == 'S') stop();
+}
+
+void forward() {
+  ledcWrite(R, receivedData.speed);
+  ledcWrite(L, receivedData.speed);
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+}
+
+void backward() {
+  ledcWrite(R, receivedData.speed);
+  ledcWrite(L, receivedData.speed);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+}
+
+void left() {
+  ledcWrite(R, receivedData.speed);
+  ledcWrite(L, receivedData.speed);
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+}
+
+void right() {
+  ledcWrite(R, receivedData.speed);
+  ledcWrite(L, receivedData.speed);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+}
+
+void stop() {
+  ledcWrite(R, 0);
+  ledcWrite(L, 0);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+}
+
