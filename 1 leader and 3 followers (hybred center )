@@ -7,7 +7,7 @@ BluetoothSerial serialBT;
 char btSignal;
 int Speed = 100;
 int enA = 5, enB = 23;
-int IN1 = 22, IN2 = 21, IN3 = 19, IN4 = 18;
+int IN1 = 32, IN2 = 33, IN3 = 19, IN4 = 18;
 #define R 0
 #define L 1
 
@@ -144,7 +144,7 @@ void sendLeaderData(char command, int speed, char direction) {
 
 // Motor control pins and setup
 int enA = 5, enB = 23;
-int IN1 = 22, IN2 = 21, IN3 = 19, IN4 = 18;
+int IN1 = 32, IN2 = 33, IN3 = 19, IN4 = 18;
 #define R 0
 #define L 1
 
