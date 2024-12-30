@@ -1,0 +1,383 @@
+leader : 
+#include "BluetoothSerial.h"
+#include <WiFi.h>
+#include <esp_now.h>
+#include <Wire.h>
+#include <QMC5883LCompass.h>
+
+// Leader car and Bluetooth variables
+BluetoothSerial serialBT;
+QMC5883LCompass compass;
+
+char btSignal;
+int Speed = 100;
+int enA = 5, enB = 23;
+int IN1 = 32, IN2 = 33, IN3 = 19, IN4 = 18;
+#define R 0
+#define L 1
+
+uint8_t followerAddr[] = {0xFC, 0xE8, 0xC0, 0x75, 0x06, 0xC4};
+
+// Leader Data Structure
+typedef struct {
+  int posX;
+  int posY;
+  char command;
+  int speed;
+  char direction;
+  int azimuth; // Added azimuth for compass direction
+} LeaderData;
+
+LeaderData leaderData = {100, 100, 'S', 0, 'N', 0}; // Initialize with a non-zero position
+
+void setup() {
+  // Serial and Bluetooth setup
+  Serial.begin(115200);
+  serialBT.begin("car(yazan)");
+  Serial.println("Bluetooth initialized");
+
+  // Motor setup
+  pinMode(enA, OUTPUT);
+  pinMode(enB, OUTPUT);
+  ledcSetup(R, 5000, 8);
+  ledcAttachPin(enA, R);
+  ledcSetup(L, 5000, 8);
+  ledcAttachPin(enB, L);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  stop();
+
+  // WiFi and ESP-NOW setup
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+  Serial.println("ESP-NOW initialized");
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, followerAddr, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add peer");
+    return;
+  }
+
+  // Compass setup
+  Wire.begin(21, 22); // SDA = GPIO21, SCL = GPIO22
+  compass.init();
+  Serial.println("QMC5883L Initialized.");
+}
+
+void loop() {
+  while (serialBT.available()) {
+    btSignal = serialBT.read();
+
+    // Handle speed settings
+    if (btSignal >= '0' && btSignal <= '9') Speed = 100 + (btSignal - '0') * 10;
+    else if (btSignal == 'q') Speed = 255;
+
+    // Handle movement commands
+    if (btSignal == 'F') { forward(); leaderData.direction = getCurrentDirection(); }
+    else if (btSignal == 'B') { backward(); leaderData.direction = getCurrentDirection(); }
+    else if (btSignal == 'L') { left(); leaderData.direction = getCurrentDirection(); }
+    else if (btSignal == 'R') { right(); leaderData.direction = getCurrentDirection(); }
+    else if (btSignal == 'S') stop();
+
+    // Read compass azimuth
+    compass.read();
+    leaderData.azimuth = compass.getAzimuth();
+
+    // Send leader data
+    sendLeaderData(btSignal, Speed, leaderData.direction, leaderData.azimuth);
+  }
+}
+
+void forward() {
+  ledcWrite(R, Speed);
+  ledcWrite(L, Speed);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+}
+
+void backward() {
+  ledcWrite(R, Speed);
+  ledcWrite(L, Speed);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void right() {
+  ledcWrite(R, Speed);
+  ledcWrite(L, Speed);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void left() {
+  ledcWrite(R, Speed);
+  ledcWrite(L, Speed);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+}
+
+void stop() {
+  ledcWrite(R, 0);
+  ledcWrite(L, 0);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
+}
+
+void sendLeaderData(char command, int speed, char direction, int azimuth) {
+  leaderData.command = command;
+  leaderData.speed = speed;
+  leaderData.azimuth = azimuth;
+
+  if (command == 'F') leaderData.posX += 10;
+  else if (command == 'B') leaderData.posX -= 10;
+  else if (command == 'L') leaderData.posY -= 10;
+  else if (command == 'R') leaderData.posY += 10;
+
+  esp_now_send(followerAddr, (uint8_t*)&leaderData, sizeof(leaderData));
+}
+
+char getCurrentDirection() {
+  compass.read();
+  int azimuth = compass.getAzimuth();
+
+  if ((azimuth >= 0 && azimuth < 45) || (azimuth > 315 && azimuth <= 360)) return 'N';
+  else if (azimuth >= 45 && azimuth < 135) return 'E';
+  else if (azimuth >= 135 && azimuth < 225) return 'S';
+  else if (azimuth >= 225 && azimuth < 315) return 'W';
+  return 'N'; // Default to North
+}
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+//follower
+
+#include <WiFi.h>
+#include <esp_now.h>
+#include <Wire.h>
+#include <QMC5883LCompass.h>
+
+// ------------------- Pins ------------------- //
+int enA = 5, enB = 23;
+int IN1 = 32, IN2 = 33, IN3 = 19, IN4 = 18;
+
+#define R 0 // PWM channel for Right motor
+#define L 1 // PWM channel for Left motor
+
+// ------------------- Compass ------------------- //
+QMC5883LCompass compass;
+
+// ------------------- Leader -> Follower Data ------------------- //
+typedef struct {
+  int posX;        
+  int posY;        
+  char command;    // 'F','B','L','R','S'
+  int speed;       // 0 - 255
+  char direction;  // (not used here)
+  int azimuth;     // Leader's heading (0-359)
+} LeaderData;
+
+LeaderData receivedData;
+
+// If you have a next follower in the chain (optional)
+LeaderData followerData;
+uint8_t nextFollowerAddr[] = {0xe8, 0x6b, 0xea, 0xd3, 0xff, 0x68};
+
+// ------------------- Alignment Settings ------------------- //
+bool initialAlignmentDone = false;
+const int alignmentThreshold = 3;  
+const int turningSpeed      = 255;  
+
+// ------------------- Setup ------------------- //
+void setup() {
+  Serial.begin(115200);
+
+  // --- Motor Pins --- //
+  pinMode(enA, OUTPUT);
+  pinMode(enB, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  // PWM Channels
+  ledcSetup(R, 5000, 8);
+  ledcAttachPin(enA, R);
+  ledcSetup(L, 5000, 8);
+  ledcAttachPin(enB, L);
+
+  stop(); // ensure motors are off at start
+
+  // --- ESP-NOW Init --- //
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+  esp_now_register_recv_cb(onDataReceived);
+
+  // (Optional) Add next follower peer
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, nextFollowerAddr, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  if (esp_now_add_peer(&peerInfo) == ESP_OK) {
+    Serial.println("Next follower added as a peer");
+  } else {
+    Serial.println("Failed to add next follower as a peer");
+  }
+
+  // --- Compass Init --- //
+  Wire.begin(21, 22);
+  compass.init();
+  Serial.println("QMC5883L Initialized.");
+}
+
+// ------------------- Loop ------------------- //
+void loop() {
+  // 1) If initial alignment not done yet, do it
+  if (!initialAlignmentDone) {
+    if (receivedData.azimuth != 0) {
+      initialAlignToLeaderAzimuth();
+      initialAlignmentDone = true;
+      stop();
+      Serial.println("Initial alignment done.");
+    }
+  } 
+  else {
+    // 2) Normal operation AFTER initial alignment
+    switch (receivedData.command) {
+      case 'F':
+        forward(receivedData.speed);
+        break;
+      case 'B':
+        backward(receivedData.speed);
+        break;
+      case 'L':
+        left(receivedData.speed);
+        break;
+      case 'R':
+        right(receivedData.speed);
+        break;
+      default:
+        // 'S' or anything else => stop
+        stop();
+        break;
+    }
+  }
+
+  // 3) Periodically share data (optional)
+  static unsigned long lastShareTime = 0;
+  const unsigned long shareInterval = 200;
+  if (millis() - lastShareTime > shareInterval) {
+    lastShareTime = millis();
+    shareFollowerData();
+  }
+}
+
+// ------------------- On Data Received ------------------- //
+void onDataReceived(const uint8_t *mac, const uint8_t *data, int len) {
+  if (len == sizeof(LeaderData)) {
+    // Copy the newly received data
+    memcpy(&receivedData, data, sizeof(LeaderData));
+    
+    // Immediately stop on new data (per your original code)
+    stop();
+    Serial.println("New data received, stopping the car...");
+  }
+}
+
+// ------------------- Initial Alignment Function ------------------- //
+void initialAlignToLeaderAzimuth() {
+  int leaderAzimuth = receivedData.azimuth;
+  if (leaderAzimuth < 0 || leaderAzimuth > 359) {
+    // Invalid azimuth => do nothing
+    return;
+  }
+
+  while (true) {
+    int currentAzimuth = getFilteredAzimuth(); // <--- Use multiple readings
+    int diff = leaderAzimuth - currentAzimuth;
+    // Normalize difference to (-180..180)
+    if (diff > 180)  diff -= 360;
+    if (diff < -180) diff += 360;
+
+    if (abs(diff) <= alignmentThreshold) {
+      // close enough
+      stop();
+      break;
+    }
+
+    // If diff > 0 => turn right; else turn left
+    if (diff > 0) {
+      right(turningSpeed);
+    } else {
+      left(turningSpeed);
+    }
+    delay(50); // small pause to let motors turn & re-check
+  }
+}
+
+// ------------------- Helper: Multiple Readings / Filtering ------------------- //
+// We'll take several samples from the compass, average them, and return that as our heading.
+int getFilteredAzimuth() {
+  const int numSamples = 7;   // Adjust to taste (5, 10, etc.)
+  long sum = 0;
+  for (int i = 0; i < numSamples; i++) {
+    compass.read();
+    sum += compass.getAzimuth();
+    delay(5); // short delay between each reading
+  }
+  return sum / numSamples;
+}
+
+// ------------------- Motor Control ------------------- //
+void forward(int speedVal) {
+  ledcWrite(R, speedVal);
+  ledcWrite(L, speedVal);
+  digitalWrite(IN1, HIGH);  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);   digitalWrite(IN4, HIGH);
+}
+
+void backward(int speedVal) {
+  ledcWrite(R, speedVal);
+  ledcWrite(L, speedVal);
+  digitalWrite(IN1, LOW);   digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH);  digitalWrite(IN4, LOW);
+}
+
+void right(int speedVal) {
+  ledcWrite(R, speedVal);
+  ledcWrite(L, speedVal);
+  digitalWrite(IN1, HIGH);  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH);  digitalWrite(IN4, LOW);
+}
+
+void left(int speedVal) {
+  ledcWrite(R, speedVal);
+  ledcWrite(L, speedVal);
+  digitalWrite(IN1, LOW);   digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW);   digitalWrite(IN4, HIGH);
+}
+
+void stop() {
+  ledcWrite(R, 0);
+  ledcWrite(L, 0);
+  digitalWrite(IN1, LOW);   digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);   digitalWrite(IN4, LOW);
+}
+
+// ------------------- Sharing Data (Optional) ------------------- //
+void shareFollowerData() {
+  followerData.azimuth  = getFilteredAzimuth();  // share your filtered heading
+  followerData.command  = receivedData.command;
+  followerData.speed    = receivedData.speed;
+  esp_now_send(nextFollowerAddr, (uint8_t*)&followerData, sizeof(followerData));
+}
