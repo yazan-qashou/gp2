@@ -638,7 +638,7 @@ LeaderData receivedData;
 
 // If you have a next follower in the chain (optional)
 LeaderData followerData;
-uint8_t nextFollowerAddr[] = {0xe8, 0x6b, 0xea, 0xd4, 0x60, 0x34}; // Follower 3 MAC address
+uint8_t nextFollowerAddr[] = {0xf0, 0x24, 0xf9, 0x57, 0x66, 0x50}; // Follower 4 MAC address(f0:24:f9:57:66:50)
 
 // ------------------- Alignment Settings ------------------- //
 bool initialAlignmentDone = false;
