@@ -192,7 +192,7 @@ uint8_t nextFollowerAddr[] = {0xe8, 0x6b, 0xea, 0xd3, 0xff, 0x68};
 
 // ------------------- Alignment Settings ------------------- //
 bool initialAlignmentDone = false;
-const int alignmentThreshold = 3;  
+const int alignmentThreshold = 1.42;  
 const int turningSpeed      = 255;  
 
 // ------------------- Setup ------------------- //
