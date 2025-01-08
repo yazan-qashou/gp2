@@ -435,7 +435,7 @@ LeaderData receivedData;
 LeaderData followerData; // Data to send to Follower 2
 
 // ------------------- Next Follower Address ------------------- //
-uint8_t nextFollowerAddr[] = {0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX}; // Replace with Follower 2's MAC address
+uint8_t nextFollowerAddr[] = {0xe8, 0x6b, 0xea, 0xd3, 0xff, 0x68}; // Replace with Follower 2's MAC address
 
 // ------------------- ISR Definitions ------------------- //
 void IRAM_ATTR ISR_countRight() { rightCounter++; }
