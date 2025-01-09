@@ -1,0 +1,1143 @@
+//LEADER 
+#include "BluetoothSerial.h"
+#include <WiFi.h>
+#include <esp_now.h>
+#include <Wire.h>
+#include <QMC5883LCompass.h>
+
+// -------------------- Bluetooth & Compass -------------------- //
+BluetoothSerial serialBT;
+QMC5883LCompass compass;
+
+// -------------------- Pins -------------------- //
+int enA = 5, enB = 23; // Motor driver pins
+int IN1 = 32, IN2 = 33, IN3 = 19, IN4 = 18;
+
+#define R 0 // PWM channel for Right motor
+#define L 1 // PWM channel for Left motor
+
+// -------------------- Ultrasonic Sensor Pins -------------------- //
+const int trigPinFront = 25;  // Trig pin for front sensor
+const int echoPinFront = 26;  // Echo pin for front sensor
+
+// -------------------- ESP-NOW -------------------- //
+uint8_t followerAddr[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+// Leader Data Structure
+typedef struct {
+  char command;        // Movement command
+  int speed;           // Motor speed
+  unsigned long runTime; // Time motors were running
+  int azimuth;         // Compass azimuth
+} LeaderData;
+
+LeaderData leaderData = {'S', 0, 0, 0}; // Initialize with default values
+
+// -------------------- Global Variables -------------------- //
+bool motorOn = false;               // Indicates if the motor is running
+unsigned long motorStartTime = 0;   // Tracks when the motor started
+
+// -------------------- Setup -------------------- //
+void setup() {
+  Serial.begin(115200);
+  serialBT.begin("car(yazan)");
+  Serial.println("Bluetooth initialized");
+
+  // Motor setup
+  pinMode(enA, OUTPUT);
+  pinMode(enB, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  ledcSetup(R, 5000, 8);
+  ledcAttachPin(enA, R);
+  ledcSetup(L, 5000, 8);
+  ledcAttachPin(enB, L);
+
+  stop(); // Ensure motors are off at start
+
+  // Ultrasonic setup
+  pinMode(trigPinFront, OUTPUT);
+  pinMode(echoPinFront, INPUT);
+
+  // ESP-NOW setup
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, followerAddr, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  esp_now_add_peer(&peerInfo);
+
+  // Compass setup
+  Wire.begin(21, 22); // SDA = GPIO21, SCL = GPIO22
+  compass.init();
+}
+
+// -------------------- Loop -------------------- //
+void loop() {
+  while (serialBT.available()) {
+    char btSignal = serialBT.read();
+
+    // Handle speed settings
+    if (btSignal >= '0' && btSignal <= '9') {
+      leaderData.speed = 100 + (btSignal - '0') * 10;
+    } else if (btSignal == 'q') {
+      leaderData.speed = 255;
+    }
+
+    // Handle movement commands
+    if (btSignal == 'F') forward();
+    else if (btSignal == 'B') backward();
+    else if (btSignal == 'L') left();
+    else if (btSignal == 'R') right();
+    else if (btSignal == 'S') stop();
+
+    // Send updated data to follower
+    sendLeaderData();
+  }
+}
+
+// -------------------- Movement -------------------- //
+void forward() {
+  float frontDistance = getDistance(trigPinFront, echoPinFront);
+  if (frontDistance <= 10) { // Obstacle within 10 cm
+    stop();
+    Serial.println("Obstacle detected in front. Stopping.");
+    sendLeaderData(); // Inform followers to stop
+    return;
+  }
+
+  startMotor();
+  ledcWrite(R, leaderData.speed);
+  ledcWrite(L, leaderData.speed);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH);
+  leaderData.command = 'F';
+}
+
+void backward() {
+  startMotor();
+  ledcWrite(R, leaderData.speed);
+  ledcWrite(L, leaderData.speed);
+  digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+  leaderData.command = 'B';
+}
+
+void left() {
+  startMotor();
+  ledcWrite(R, leaderData.speed);
+  ledcWrite(L, leaderData.speed);
+  digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH);
+  leaderData.command = 'L';
+}
+
+void right() {
+  startMotor();
+  ledcWrite(R, leaderData.speed);
+  ledcWrite(L, leaderData.speed);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+  leaderData.command = 'R';
+}
+
+void stop() {
+  if (motorOn) {
+    leaderData.runTime = millis() - motorStartTime; // Calculate motor run time
+    motorOn = false;
+  }
+  ledcWrite(R, 0);
+  ledcWrite(L, 0);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
+  leaderData.command = 'S';
+}
+
+// -------------------- Ultrasonic Function -------------------- //
+float getDistance(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(echoPin, HIGH, 30000); // 30 ms timeout
+  if (duration == 0) {
+    return 999; // No echo
+  }
+
+  float distance = duration * 0.028 / 2; // Distance in cm
+  return distance;
+}
+
+// -------------------- Helper Functions -------------------- //
+void startMotor() {
+  if (!motorOn) {
+    motorStartTime = millis();
+    motorOn = true;
+  }
+}
+
+void sendLeaderData() {
+  // Include compass azimuth in data
+  compass.read();
+  leaderData.azimuth = compass.getAzimuth();
+  esp_now_send(followerAddr, (uint8_t*)&leaderData, sizeof(leaderData));
+}
+
+------------------------------------------------------
+//FOLLOWER1 
+#include <WiFi.h>
+#include <esp_now.h>
+#include <Wire.h>
+#include <QMC5883LCompass.h>
+
+// ------------------- Pins ------------------- //
+int enA = 5, enB = 23;
+int IN1 = 32, IN2 = 33, IN3 = 19, IN4 = 18;
+
+#define R 0 // PWM channel for Right motor
+#define L 1 // PWM channel for Left motor
+
+// ------------------- Encoder Pins ------------------- //
+const int rightEncPin = 12;
+const int leftEncPin = 14;
+
+volatile unsigned int rightCounter = 0;
+volatile unsigned int leftCounter = 0;
+
+// ------------------- Compass ------------------- //
+QMC5883LCompass compass;
+
+// ------------------- Calibration Factor ------------------- //
+const float calibrationFactor = 0.088; // Adjust based on observed discrepancies
+const unsigned long minRunTime = 350;
+
+// ------------------- Leader -> Follower Data ------------------- //
+typedef struct {
+    char command;
+    int speed;
+    unsigned long runTime;
+    int azimuth; // Compass azimuth
+} LeaderData;
+
+LeaderData receivedData;
+LeaderData followerData; // Data to send to Follower 2
+
+// ------------------- Follower 2 MAC Address ------------------- //
+uint8_t follower2Addr[] = {0xe8, 0x6b, 0xea, 0xd3, 0xff, 0x68}; // Replace with Follower 2's MAC address
+
+// ------------------- ISR Definitions ------------------- //
+void IRAM_ATTR ISR_countRight() { rightCounter++; }
+void IRAM_ATTR ISR_countLeft() { leftCounter++; }
+
+// ------------------- Setup ------------------- //
+void setup() {
+    Serial.begin(115200);
+
+    pinMode(enA, OUTPUT);
+    pinMode(enB, OUTPUT);
+    pinMode(IN1, OUTPUT);
+    pinMode(IN2, OUTPUT);
+    pinMode(IN3, OUTPUT);
+    pinMode(IN4, OUTPUT);
+
+    ledcSetup(R, 5000, 8);
+    ledcAttachPin(enA, R);
+    ledcSetup(L, 5000, 8);
+    ledcAttachPin(enB, L);
+
+    stop();
+
+    pinMode(rightEncPin, INPUT);
+    pinMode(leftEncPin, INPUT);
+    attachInterrupt(digitalPinToInterrupt(rightEncPin), ISR_countRight, RISING);
+    attachInterrupt(digitalPinToInterrupt(leftEncPin), ISR_countLeft, RISING);
+
+    WiFi.mode(WIFI_STA);
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("Error initializing ESP-NOW");
+        return;
+    }
+    esp_now_register_recv_cb(onDataReceived);
+
+    // Add Follower 2 as a peer
+    esp_now_peer_info_t peerInfo = {};
+    memcpy(peerInfo.peer_addr, follower2Addr, 6);
+    peerInfo.channel = 0;
+    peerInfo.encrypt = false;
+    esp_now_add_peer(&peerInfo);
+
+    Wire.begin(21, 22);
+    compass.init();
+}
+
+// ------------------- Loop ------------------- //
+void loop() {
+    executeCommand();
+}
+
+// ------------------- Data Received ------------------- //
+void onDataReceived(const uint8_t *mac, const uint8_t *data, int len) {
+    if (len == sizeof(LeaderData)) {
+        memcpy(&receivedData, data, sizeof(LeaderData));
+        executeCommand();
+        sendFollowerData(); // Send data to Follower 2
+    }
+}
+
+// ------------------- Send Data to Follower 2 ------------------- //
+void sendFollowerData() {
+    memcpy(&followerData, &receivedData, sizeof(LeaderData));
+    followerData.azimuth = compass.getAzimuth(); // Update with the follower's azimuth
+    esp_now_send(follower2Addr, (uint8_t*)&followerData, sizeof(followerData));
+}
+
+// ------------------- Execute Leader Command ------------------- //
+void executeCommand() {
+    switch (receivedData.command) {
+        case 'F': moveForward(receivedData.speed, receivedData.runTime); break;
+        case 'B': moveBackward(receivedData.speed, receivedData.runTime); break;
+        case 'L': moveLeft(receivedData.speed, receivedData.runTime); break;
+        case 'R': moveRight(receivedData.speed, receivedData.runTime); break;
+        case 'S': stop(); break;
+        default: stop(); break;
+    }
+}
+
+// ------------------- Movement ------------------- //
+void moveForward(int speed, unsigned long leaderRunTime) {
+    resetEncoders();
+    unsigned long startTime = millis();
+    forward(speed);
+
+    while (millis() - startTime < leaderRunTime * calibrationFactor) {
+        unsigned int rightCount = rightCounter;
+        unsigned int leftCount = leftCounter;
+
+        if (abs((int)(rightCount - leftCount)) > 2) {
+            if (rightCount > leftCount) ledcWrite(L, speed + 10);
+            else if (leftCount > rightCount) ledcWrite(R, speed + 10);
+        }
+    }
+    stop();
+}
+
+void moveBackward(int speed, unsigned long leaderRunTime) {
+    resetEncoders();
+    unsigned long startTime = millis();
+    backward(speed);
+
+    while (millis() - startTime < leaderRunTime * calibrationFactor) {
+        unsigned int rightCount = rightCounter;
+        unsigned int leftCount = leftCounter;
+
+        if (abs((int)(rightCount - leftCount)) > 2) {
+            if (rightCount > leftCount) ledcWrite(L, speed + 10);
+            else if (leftCount > rightCount) ledcWrite(R, speed + 10);
+        }
+    }
+    stop();
+}
+
+void moveLeft(int speed, unsigned long leaderRunTime) {
+    resetEncoders();
+    unsigned long startTime = millis();
+    left(speed);
+
+    while (millis() - startTime < leaderRunTime * calibrationFactor) {
+        unsigned int rightCount = rightCounter;
+        unsigned int leftCount = leftCounter;
+
+        if (abs((int)(rightCount - leftCount)) > 2) {
+            if (rightCount > leftCount) ledcWrite(L, speed + 10);
+            else if (leftCount > rightCount) ledcWrite(R, speed + 10);
+        }
+    }
+    stop();
+}
+
+void moveRight(int speed, unsigned long leaderRunTime) {
+    resetEncoders();
+    unsigned long startTime = millis();
+    right(speed);
+
+    while (millis() - startTime < leaderRunTime * calibrationFactor) {
+        unsigned int rightCount = rightCounter;
+        unsigned int leftCount = leftCounter;
+
+        if (abs((int)(rightCount - leftCount)) > 2) {
+            if (rightCount > leftCount) ledcWrite(L, speed + 10);
+            else if (leftCount > rightCount) ledcWrite(R, speed + 10);
+        }
+    }
+    stop();
+}
+
+// ------------------- Motor Control ------------------- //
+void forward(int speedVal) {
+    ledcWrite(R, speedVal);
+    ledcWrite(L, speedVal);
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+}
+
+void backward(int speedVal) {
+    ledcWrite(R, speedVal);
+    ledcWrite(L, speedVal);
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+}
+
+void left(int speedVal) {
+    ledcWrite(R, speedVal);
+    ledcWrite(L, speedVal);
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+}
+
+void right(int speedVal) {
+    ledcWrite(R, speedVal);
+    ledcWrite(L, speedVal);
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+}
+
+void stop() {
+    ledcWrite(R, 0);
+    ledcWrite(L, 0);
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, LOW);
+}
+
+void resetEncoders() {
+    noInterrupts();
+    rightCounter = 0;
+    leftCounter = 0;
+    interrupts();
+}
+-----------------------------------------------------------------
+//FOLLOWER 2
+#include <WiFi.h>
+#include <esp_now.h>
+#include <Wire.h>
+#include <QMC5883LCompass.h>
+
+// ------------------- Pins ------------------- //
+int enA = 5, enB = 23;
+int IN1 = 32, IN2 = 33, IN3 = 19, IN4 = 18;
+
+#define R 0 // PWM channel for Right motor
+#define L 1 // PWM channel for Left motor
+
+// ------------------- Encoder Pins ------------------- //
+const int rightEncPin = 12;
+const int leftEncPin = 14;
+
+volatile unsigned int rightCounter = 0;
+volatile unsigned int leftCounter = 0;
+
+// ------------------- Compass ------------------- //
+QMC5883LCompass compass;
+
+// ------------------- Calibration Factor ------------------- //
+const float calibrationFactor = 0.088; // Adjust based on observed discrepancies
+const unsigned long minRunTime = 350;
+
+// ------------------- Leader -> Follower Data ------------------- //
+typedef struct {
+    char command;
+    int speed;
+    unsigned long runTime;
+    int azimuth; // Compass azimuth
+} LeaderData;
+
+LeaderData receivedData;
+LeaderData followerData; // Data to send to Follower 3
+
+// ------------------- Follower 2 MAC Address ------------------- //
+uint8_t follower3Addr[] = {0xe8, 0x6b, 0xea, 0xd4, 0x60, 0x34}; // Replace with Follower 3's MAC address
+
+// ------------------- ISR Definitions ------------------- //
+void IRAM_ATTR ISR_countRight() { rightCounter++; }
+void IRAM_ATTR ISR_countLeft() { leftCounter++; }
+
+// ------------------- Setup ------------------- //
+void setup() {
+    Serial.begin(115200);
+
+    pinMode(enA, OUTPUT);
+    pinMode(enB, OUTPUT);
+    pinMode(IN1, OUTPUT);
+    pinMode(IN2, OUTPUT);
+    pinMode(IN3, OUTPUT);
+    pinMode(IN4, OUTPUT);
+
+    ledcSetup(R, 5000, 8);
+    ledcAttachPin(enA, R);
+    ledcSetup(L, 5000, 8);
+    ledcAttachPin(enB, L);
+
+    stop();
+
+    pinMode(rightEncPin, INPUT);
+    pinMode(leftEncPin, INPUT);
+    attachInterrupt(digitalPinToInterrupt(rightEncPin), ISR_countRight, RISING);
+    attachInterrupt(digitalPinToInterrupt(leftEncPin), ISR_countLeft, RISING);
+
+    WiFi.mode(WIFI_STA);
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("Error initializing ESP-NOW");
+        return;
+    }
+    esp_now_register_recv_cb(onDataReceived);
+
+    // Add Follower 2 as a peer
+    esp_now_peer_info_t peerInfo = {};
+    memcpy(peerInfo.peer_addr, follower3Addr, 6);
+    peerInfo.channel = 0;
+    peerInfo.encrypt = false;
+    esp_now_add_peer(&peerInfo);
+
+    Wire.begin(21, 22);
+    compass.init();
+}
+
+// ------------------- Loop ------------------- //
+void loop() {
+    executeCommand();
+}
+
+// ------------------- Data Received ------------------- //
+void onDataReceived(const uint8_t *mac, const uint8_t *data, int len) {
+    if (len == sizeof(LeaderData)) {
+        memcpy(&receivedData, data, sizeof(LeaderData));
+        executeCommand();
+        sendFollowerData(); // Send data to Follower 2
+    }
+}
+
+// ------------------- Send Data to Follower 2 ------------------- //
+void sendFollowerData() {
+    memcpy(&followerData, &receivedData, sizeof(LeaderData));
+    followerData.azimuth = compass.getAzimuth(); // Update with the follower's azimuth
+    esp_now_send(follower3Addr, (uint8_t*)&followerData, sizeof(followerData));
+}
+
+// ------------------- Execute Leader Command ------------------- //
+void executeCommand() {
+    switch (receivedData.command) {
+        case 'F': moveForward(receivedData.speed, receivedData.runTime); break;
+        case 'B': moveBackward(receivedData.speed, receivedData.runTime); break;
+        case 'L': moveLeft(receivedData.speed, receivedData.runTime); break;
+        case 'R': moveRight(receivedData.speed, receivedData.runTime); break;
+        case 'S': stop(); break;
+        default: stop(); break;
+    }
+}
+
+// ------------------- Movement ------------------- //
+void moveForward(int speed, unsigned long leaderRunTime) {
+    resetEncoders();
+    unsigned long startTime = millis();
+    forward(speed);
+
+    while (millis() - startTime < leaderRunTime * calibrationFactor) {
+        unsigned int rightCount = rightCounter;
+        unsigned int leftCount = leftCounter;
+
+        if (abs((int)(rightCount - leftCount)) > 2) {
+            if (rightCount > leftCount) ledcWrite(L, speed + 10);
+            else if (leftCount > rightCount) ledcWrite(R, speed + 10);
+        }
+    }
+    stop();
+}
+
+void moveBackward(int speed, unsigned long leaderRunTime) {
+    resetEncoders();
+    unsigned long startTime = millis();
+    backward(speed);
+
+    while (millis() - startTime < leaderRunTime * calibrationFactor) {
+        unsigned int rightCount = rightCounter;
+        unsigned int leftCount = leftCounter;
+
+        if (abs((int)(rightCount - leftCount)) > 2) {
+            if (rightCount > leftCount) ledcWrite(L, speed + 10);
+            else if (leftCount > rightCount) ledcWrite(R, speed + 10);
+        }
+    }
+    stop();
+}
+
+void moveLeft(int speed, unsigned long leaderRunTime) {
+    resetEncoders();
+    unsigned long startTime = millis();
+    left(speed);
+
+    while (millis() - startTime < leaderRunTime * calibrationFactor) {
+        unsigned int rightCount = rightCounter;
+        unsigned int leftCount = leftCounter;
+
+        if (abs((int)(rightCount - leftCount)) > 2) {
+            if (rightCount > leftCount) ledcWrite(L, speed + 10);
+            else if (leftCount > rightCount) ledcWrite(R, speed + 10);
+        }
+    }
+    stop();
+}
+
+void moveRight(int speed, unsigned long leaderRunTime) {
+    resetEncoders();
+    unsigned long startTime = millis();
+    right(speed);
+
+    while (millis() - startTime < leaderRunTime * calibrationFactor) {
+        unsigned int rightCount = rightCounter;
+        unsigned int leftCount = leftCounter;
+
+        if (abs((int)(rightCount - leftCount)) > 2) {
+            if (rightCount > leftCount) ledcWrite(L, speed + 10);
+            else if (leftCount > rightCount) ledcWrite(R, speed + 10);
+        }
+    }
+    stop();
+}
+
+// ------------------- Motor Control ------------------- //
+void forward(int speedVal) {
+    ledcWrite(R, speedVal);
+    ledcWrite(L, speedVal);
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+}
+
+void backward(int speedVal) {
+    ledcWrite(R, speedVal);
+    ledcWrite(L, speedVal);
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+}
+
+void left(int speedVal) {
+    ledcWrite(R, speedVal);
+    ledcWrite(L, speedVal);
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+}
+
+void right(int speedVal) {
+    ledcWrite(R, speedVal);
+    ledcWrite(L, speedVal);
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+}
+
+void stop() {
+    ledcWrite(R, 0);
+    ledcWrite(L, 0);
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, LOW);
+}
+
+void resetEncoders() {
+    noInterrupts();
+    rightCounter = 0;
+    leftCounter = 0;
+    interrupts();
+}
+----------------------------------------------------------
+//FOLLOWER 3
+//follower 3
+#include <WiFi.h>
+#include <esp_now.h>
+#include <Wire.h>
+#include <QMC5883LCompass.h>
+
+// ------------------- Pins ------------------- //
+int enA = 5, enB = 23;
+int IN1 = 32, IN2 = 33, IN3 = 19, IN4 = 18;
+
+#define R 0 // PWM channel for Right motor
+#define L 1 // PWM channel for Left motor
+
+// ------------------- Encoder Pins ------------------- //
+const int rightEncPin = 12;
+const int leftEncPin = 14;
+
+volatile unsigned int rightCounter = 0;
+volatile unsigned int leftCounter = 0;
+
+// ------------------- Compass ------------------- //
+QMC5883LCompass compass;
+
+// ------------------- Calibration Factor ------------------- //
+const float calibrationFactor = 0.088; // Adjust based on observed discrepancies
+const unsigned long minRunTime = 350;
+
+// ------------------- Leader -> Follower Data ------------------- //
+typedef struct {
+    char command;
+    int speed;
+    unsigned long runTime;
+    int azimuth; // Compass azimuth
+} LeaderData;
+
+LeaderData receivedData;
+LeaderData followerData; // Data to send to Follower 4
+
+// ------------------- Follower MAC Address ------------------- //
+uint8_t follower4Addr[] = {0xf0, 0x24, 0xf9, 0x57, 0x66, 0x50}; // Replace with Follower 4's MAC address
+
+// ------------------- ISR Definitions ------------------- //
+void IRAM_ATTR ISR_countRight() { rightCounter++; }
+void IRAM_ATTR ISR_countLeft() { leftCounter++; }
+
+// ------------------- Setup ------------------- //
+void setup() {
+    Serial.begin(115200);
+
+    pinMode(enA, OUTPUT);
+    pinMode(enB, OUTPUT);
+    pinMode(IN1, OUTPUT);
+    pinMode(IN2, OUTPUT);
+    pinMode(IN3, OUTPUT);
+    pinMode(IN4, OUTPUT);
+
+    ledcSetup(R, 5000, 8);
+    ledcAttachPin(enA, R);
+    ledcSetup(L, 5000, 8);
+    ledcAttachPin(enB, L);
+
+    stop();
+
+    pinMode(rightEncPin, INPUT);
+    pinMode(leftEncPin, INPUT);
+    attachInterrupt(digitalPinToInterrupt(rightEncPin), ISR_countRight, RISING);
+    attachInterrupt(digitalPinToInterrupt(leftEncPin), ISR_countLeft, RISING);
+
+    WiFi.mode(WIFI_STA);
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("Error initializing ESP-NOW");
+        return;
+    }
+    esp_now_register_recv_cb(onDataReceived);
+
+    // Add Follower 2 as a peer
+    esp_now_peer_info_t peerInfo = {};
+    memcpy(peerInfo.peer_addr, follower4Addr, 6);
+    peerInfo.channel = 0;
+    peerInfo.encrypt = false;
+    esp_now_add_peer(&peerInfo);
+
+    Wire.begin(21, 22);
+    compass.init();
+}
+
+// ------------------- Loop ------------------- //
+void loop() {
+    executeCommand();
+}
+
+// ------------------- Data Received ------------------- //
+void onDataReceived(const uint8_t *mac, const uint8_t *data, int len) {
+    if (len == sizeof(LeaderData)) {
+        memcpy(&receivedData, data, sizeof(LeaderData));
+        executeCommand();
+        sendFollowerData(); // Send data to Follower 2
+    }
+}
+
+// ------------------- Send Data to Follower 2 ------------------- //
+void sendFollowerData() {
+    memcpy(&followerData, &receivedData, sizeof(LeaderData));
+    followerData.azimuth = compass.getAzimuth(); // Update with the follower's azimuth
+    esp_now_send(follower4Addr, (uint8_t*)&followerData, sizeof(followerData));
+}
+
+// ------------------- Execute Leader Command ------------------- //
+void executeCommand() {
+    switch (receivedData.command) {
+        case 'F': moveForward(receivedData.speed, receivedData.runTime); break;
+        case 'B': moveBackward(receivedData.speed, receivedData.runTime); break;
+        case 'L': moveLeft(receivedData.speed, receivedData.runTime); break;
+        case 'R': moveRight(receivedData.speed, receivedData.runTime); break;
+        case 'S': stop(); break;
+        default: stop(); break;
+    }
+}
+
+// ------------------- Movement ------------------- //
+void moveForward(int speed, unsigned long leaderRunTime) {
+    resetEncoders();
+    unsigned long startTime = millis();
+    forward(speed);
+
+    while (millis() - startTime < leaderRunTime * calibrationFactor) {
+        unsigned int rightCount = rightCounter;
+        unsigned int leftCount = leftCounter;
+
+        if (abs((int)(rightCount - leftCount)) > 2) {
+            if (rightCount > leftCount) ledcWrite(L, speed + 10);
+            else if (leftCount > rightCount) ledcWrite(R, speed + 10);
+        }
+    }
+    stop();
+}
+
+void moveBackward(int speed, unsigned long leaderRunTime) {
+    resetEncoders();
+    unsigned long startTime = millis();
+    backward(speed);
+
+    while (millis() - startTime < leaderRunTime * calibrationFactor) {
+        unsigned int rightCount = rightCounter;
+        unsigned int leftCount = leftCounter;
+
+        if (abs((int)(rightCount - leftCount)) > 2) {
+            if (rightCount > leftCount) ledcWrite(L, speed + 10);
+            else if (leftCount > rightCount) ledcWrite(R, speed + 10);
+        }
+    }
+    stop();
+}
+
+void moveLeft(int speed, unsigned long leaderRunTime) {
+    resetEncoders();
+    unsigned long startTime = millis();
+    left(speed);
+
+    while (millis() - startTime < leaderRunTime * calibrationFactor) {
+        unsigned int rightCount = rightCounter;
+        unsigned int leftCount = leftCounter;
+
+        if (abs((int)(rightCount - leftCount)) > 2) {
+            if (rightCount > leftCount) ledcWrite(L, speed + 10);
+            else if (leftCount > rightCount) ledcWrite(R, speed + 10);
+        }
+    }
+    stop();
+}
+
+void moveRight(int speed, unsigned long leaderRunTime) {
+    resetEncoders();
+    unsigned long startTime = millis();
+    right(speed);
+
+    while (millis() - startTime < leaderRunTime * calibrationFactor) {
+        unsigned int rightCount = rightCounter;
+        unsigned int leftCount = leftCounter;
+
+        if (abs((int)(rightCount - leftCount)) > 2) {
+            if (rightCount > leftCount) ledcWrite(L, speed + 10);
+            else if (leftCount > rightCount) ledcWrite(R, speed + 10);
+        }
+    }
+    stop();
+}
+
+// ------------------- Motor Control ------------------- //
+void forward(int speedVal) {
+    ledcWrite(R, speedVal);
+    ledcWrite(L, speedVal);
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+}
+
+void backward(int speedVal) {
+    ledcWrite(R, speedVal);
+    ledcWrite(L, speedVal);
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+}
+
+void left(int speedVal) {
+    ledcWrite(R, speedVal);
+    ledcWrite(L, speedVal);
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+}
+
+void right(int speedVal) {
+    ledcWrite(R, speedVal);
+    ledcWrite(L, speedVal);
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+}
+
+void stop() {
+    ledcWrite(R, 0);
+    ledcWrite(L, 0);
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, LOW);
+}
+
+void resetEncoders() {
+    noInterrupts();
+    rightCounter = 0;
+    leftCounter = 0;
+    interrupts();
+}
+_____________________________________________________
+
+//LAST FOLLOWER
+//LAST FOLLOWER 
+
+#include <WiFi.h>
+#include <esp_now.h>
+#include <Wire.h>
+#include <QMC5883LCompass.h>
+
+// ------------------- Pins ------------------- //
+int enA = 5, enB = 23;
+int IN1 = 32, IN2 = 33, IN3 = 19, IN4 = 18;
+
+#define R 0 // PWM channel for Right motor
+#define L 1 // PWM channel for Left motor
+
+// ------------------- Encoder Pins ------------------- //
+const int rightEncPin = 12;
+const int leftEncPin = 14;
+
+volatile unsigned int rightCounter = 0;
+volatile unsigned int leftCounter = 0;
+
+// ------------------- Compass ------------------- //
+QMC5883LCompass compass;
+
+// ------------------- Calibration Factor ------------------- //
+const float calibrationFactor = 0.088; // Adjust based on observed discrepancies
+const unsigned long minRunTime = 350;
+
+// ------------------- Leader -> Follower Data ------------------- //
+typedef struct {
+    char command;
+    int speed;
+    unsigned long runTime;
+    int azimuth; // Compass azimuth
+} LeaderData;
+
+LeaderData receivedData;
+
+// ------------------- ISR Definitions ------------------- //
+void IRAM_ATTR ISR_countRight() { rightCounter++; }
+void IRAM_ATTR ISR_countLeft() { leftCounter++; }
+
+// ------------------- Setup ------------------- //
+void setup() {
+    Serial.begin(115200);
+
+    pinMode(enA, OUTPUT);
+    pinMode(enB, OUTPUT);
+    pinMode(IN1, OUTPUT);
+    pinMode(IN2, OUTPUT);
+    pinMode(IN3, OUTPUT);
+    pinMode(IN4, OUTPUT);
+
+    ledcSetup(R, 5000, 8);
+    ledcAttachPin(enA, R);
+    ledcSetup(L, 5000, 8);
+    ledcAttachPin(enB, L);
+
+    stop();
+
+    pinMode(rightEncPin, INPUT);
+    pinMode(leftEncPin, INPUT);
+    attachInterrupt(digitalPinToInterrupt(rightEncPin), ISR_countRight, RISING);
+    attachInterrupt(digitalPinToInterrupt(leftEncPin), ISR_countLeft, RISING);
+
+    WiFi.mode(WIFI_STA);
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("Error initializing ESP-NOW");
+        return;
+    }
+    esp_now_register_recv_cb(onDataReceived);
+
+    Wire.begin(21, 22);
+    compass.init();
+}
+
+// ------------------- Loop ------------------- //
+void loop() {
+    executeCommand();
+}
+
+// ------------------- Data Received ------------------- //
+void onDataReceived(const uint8_t *mac, const uint8_t *data, int len) {
+    if (len == sizeof(LeaderData)) {
+        memcpy(&receivedData, data, sizeof(LeaderData));
+        executeCommand();
+    }
+}
+
+// ------------------- Execute Leader Command ------------------- //
+void executeCommand() {
+    switch (receivedData.command) {
+        case 'F': moveForward(receivedData.speed, receivedData.runTime); break;
+        case 'B': moveBackward(receivedData.speed, receivedData.runTime); break;
+        case 'L': moveLeft(receivedData.speed, receivedData.runTime); break;
+        case 'R': moveRight(receivedData.speed, receivedData.runTime); break;
+        case 'S': stop(); break;
+        default: stop(); break;
+    }
+}
+
+// ------------------- Movement ------------------- //
+void moveForward(int speed, unsigned long leaderRunTime) {
+    resetEncoders();
+    unsigned long startTime = millis();
+    forward(speed);
+
+    while (millis() - startTime < leaderRunTime * calibrationFactor) {
+        unsigned int rightCount = rightCounter;
+        unsigned int leftCount = leftCounter;
+
+        if (abs((int)(rightCount - leftCount)) > 2) {
+            if (rightCount > leftCount) ledcWrite(L, speed + 10);
+            else if (leftCount > rightCount) ledcWrite(R, speed + 10);
+        }
+    }
+    stop();
+}
+
+void moveBackward(int speed, unsigned long leaderRunTime) {
+    resetEncoders();
+    unsigned long startTime = millis();
+    backward(speed);
+
+    while (millis() - startTime < leaderRunTime * calibrationFactor) {
+        unsigned int rightCount = rightCounter;
+        unsigned int leftCount = leftCounter;
+
+        if (abs((int)(rightCount - leftCount)) > 2) {
+            if (rightCount > leftCount) ledcWrite(L, speed + 10);
+            else if (leftCount > rightCount) ledcWrite(R, speed + 10);
+        }
+    }
+    stop();
+}
+
+void moveLeft(int speed, unsigned long leaderRunTime) {
+    resetEncoders();
+    unsigned long startTime = millis();
+    left(speed);
+
+    while (millis() - startTime < leaderRunTime * calibrationFactor) {
+        unsigned int rightCount = rightCounter;
+        unsigned int leftCount = leftCounter;
+
+        if (abs((int)(rightCount - leftCount)) > 2) {
+            if (rightCount > leftCount) ledcWrite(L, speed + 10);
+            else if (leftCount > rightCount) ledcWrite(R, speed + 10);
+        }
+    }
+    stop();
+}
+
+void moveRight(int speed, unsigned long leaderRunTime) {
+    resetEncoders();
+    unsigned long startTime = millis();
+    right(speed);
+
+    while (millis() - startTime < leaderRunTime * calibrationFactor) {
+        unsigned int rightCount = rightCounter;
+        unsigned int leftCount = leftCounter;
+
+        if (abs((int)(rightCount - leftCount)) > 2) {
+            if (rightCount > leftCount) ledcWrite(L, speed + 10);
+            else if (leftCount > rightCount) ledcWrite(R, speed + 10);
+        }
+    }
+    stop();
+}
+
+// ------------------- Motor Control ------------------- //
+void forward(int speedVal) {
+    ledcWrite(R, speedVal);
+    ledcWrite(L, speedVal);
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+}
+
+void backward(int speedVal) {
+    ledcWrite(R, speedVal);
+    ledcWrite(L, speedVal);
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+}
+
+void right(int speedVal) {
+    ledcWrite(R, speedVal);
+    ledcWrite(L, speedVal);
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+}
+
+void left(int speedVal) {
+    ledcWrite(R, speedVal);
+    ledcWrite(L, speedVal);
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+}
+
+void stop() {
+    ledcWrite(R, 0);
+    ledcWrite(L, 0);
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, LOW);
+}
+
+void resetEncoders() {
+    noInterrupts();
+    rightCounter = 0;
+    leftCounter = 0;
+    interrupts();
+}
